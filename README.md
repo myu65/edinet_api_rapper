@@ -1,1 +1,3 @@
 # edinet_api_rapper
+
+FastAPIでEDINETをラップするAPI。データベースに入れるのに項目が足りないとか絞り込みしたいとか用。
