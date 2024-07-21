@@ -3,7 +3,7 @@
 from fastapi import HTTPException, status, Security, FastAPI
 from fastapi.security import APIKeyHeader, APIKeyQuery
 import uvicorn
-from datetime import date, datetime
+from datetime import date, timedelta
 import requests
 import os
 import io
@@ -12,7 +12,7 @@ import zipfile
 import uuid
 from glob import glob
 import shutil
-from module import utf_converter
+from module import utf_converter, edinet_doc
 
 api_key = os.getenv("FASTAPI_APIKEY")
 API_KEYS = []
@@ -57,6 +57,70 @@ def hello_world():
     """A public endpoint that does not require any authentication."""
     return "hello world"
 
+
+@app.get("/edinet_yukashoken")
+def get_edinet_json(
+    from_date :date,
+    to_date: date,
+    next_page_token: date = None,
+    api_key: str = Security(get_api_key),
+    ):
+    """EDINETを日付範囲で有価証券報告書を1テーブルで返す。範囲を決めたうえで半ページ送り式でnext_tokenには日付が入る。返ってくるnext_tokenがnoneならおわり。"""
+
+    # 参考
+    # https://note.com/python_beginner/n/na0e51d80bc35
+
+    edinet_api_key = os.getenv("EDINET_API_KEY")
+    URL = "https://disclosure.edinet-fsa.go.jp/api/v2/documents.json"
+
+    # metadataをとる
+
+    if next_page_token:
+        # 最初はNoneが来ることになってるのでそうじゃなかったら続きから
+        target_date = next_page_token
+    else:
+        target_date = from_date
+
+    # メタデータ部分とる。適当。
+    while target_date <= to_date:
+
+        params = {
+            "date" : target_date,
+            "type" : 2,
+            "Subscription-Key" : edinet_api_key
+        }
+
+        res = requests.get(URL, params = params)
+        data = res.json()
+
+
+        # 有価証券報告書だけとりだす
+        data = [doc for doc in data['results'] if doc['docDescription'] is not None and '有価証券報告書' in doc['docDescription']]
+
+
+        # 各docに "target_date":date を追加
+        target_date += timedelta(days=1)
+        next_page_token = target_date
+
+        if not data:
+            # 空だったらループを継続抜ける。
+            continue
+
+        # １日ごとに返す。
+        break
+
+    # doc部分とる
+    for doc in data:
+        doc_data = edinet_doc.get_edinet_doc_json(doc["docID"])
+        doc["data"] = doc_data
+
+
+    if next_page_token >= to_date:
+        next_page_token = None
+
+    return {'data': data, 'next_page_token':next_page_token}
+
+
 @app.get("/edinet_json")
 def get_edinet_json(
     target_date :date,
@@ -83,15 +147,22 @@ def get_edinet_json(
     # 有価証券報告書だけとりだす
     data = [doc for doc in data['results'] if doc['docDescription'] is not None and '有価証券報告書' in doc['docDescription']]
 
+    # 各docに "target_date":date を追加
+    for doc in data:
+        doc["target_date"] = target_date
+
     return data
 
 @app.get("/edinet_doc")
 def get_edinet_json(
     doc_id :str,
+    date: date = date.today(),
     api_key: str = Security(get_api_key)
     
     ):
-    """EDINETを叩いてまずはdocidの中身を解凍して返す"""
+    """EDINETを叩いてまずはdocidの中身を解凍して返す
+    日付を何かテーブルに入れたいけどめんどくさい。
+    """
 
     # 参考
     # https://note.com/python_beginner/n/na0e51d80bc35
@@ -136,7 +207,7 @@ def get_edinet_json(
 
     duckdb.read_csv(f"downloads/{dir_id}/XBRL_TO_CSV/*.csv")    
 
-    data = duckdb.sql(f"""select gen_random_uuid() as uuid, '{doc_id}' as doc_id, * from 'downloads/{dir_id}/XBRL_TO_CSV/*.csv'""").to_df().to_dict('records')
+    data = duckdb.sql(f"""select gen_random_uuid() as uuid, '{date}' as create_or_insert_date ,'{doc_id}' as doc_id, * from 'downloads/{dir_id}/XBRL_TO_CSV/*.csv'""").to_df().to_dict('records')
     shutil.rmtree(f"downloads/{dir_id}")
 
 
