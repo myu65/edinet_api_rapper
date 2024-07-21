@@ -1,0 +1,495 @@
+version: 2.0.0
+
+type: DeclarativeSource
+
+check:
+  type: CheckStream
+  stream_names:
+    - documents
+
+definitions:
+  streams:
+    metadata:
+      type: DeclarativeStream
+      name: metadata
+      retriever:
+        type: SimpleRetriever
+        requester:
+          $ref: '#/definitions/base_requester'
+          path: edinet_json
+          http_method: GET
+        record_selector:
+          type: RecordSelector
+          extractor:
+            type: DpathExtractor
+            field_path: []
+      primary_key:
+        - docID
+      schema_loader:
+        type: InlineSchemaLoader
+        schema:
+          $ref: '#/schemas/metadata'
+      incremental_sync:
+        type: DatetimeBasedCursor
+        step: P1D
+        cursor_field: target_date
+        end_datetime:
+          type: MinMaxDatetime
+          datetime: '{{ now_utc().strftime(''%Y-%m-%dT%H:%M:%SZ'') }}'
+          datetime_format: '%Y-%m-%dT%H:%M:%SZ'
+        start_datetime:
+          type: MinMaxDatetime
+          datetime: '{{ config["start_date"] }}'
+          datetime_format: '%Y-%m-%dT%H:%M:%SZ'
+        datetime_format: '%Y-%m-%d'
+        start_time_option:
+          type: RequestOption
+          field_name: target_date
+          inject_into: request_parameter
+        cursor_granularity: P1D
+        cursor_datetime_formats:
+          - '%Y-%m-%d'
+    documents:
+      type: DeclarativeStream
+      name: documents
+      retriever:
+        type: SimpleRetriever
+        requester:
+          $ref: '#/definitions/base_requester'
+          path: edinet_doc
+          http_method: GET
+        record_selector:
+          type: RecordSelector
+          extractor:
+            type: DpathExtractor
+            field_path: []
+        partition_router:
+          type: SubstreamPartitionRouter
+          parent_stream_configs:
+            - type: ParentStreamConfig
+              stream:
+                $ref: '#/definitions/streams/metadata'
+              parent_key: docID
+              request_option:
+                type: RequestOption
+                field_name: doc_id
+                inject_into: request_parameter
+              partition_field: doc_id
+      schema_loader:
+        type: InlineSchemaLoader
+        schema:
+          $ref: '#/schemas/documents'
+      incremental_sync:
+        type: DatetimeBasedCursor
+        cursor_field: create_or_insert_date
+        end_datetime:
+          type: MinMaxDatetime
+          datetime: '{{ now_utc().strftime(''%Y-%m-%dT%H:%M:%SZ'') }}'
+          datetime_format: '%Y-%m-%dT%H:%M:%SZ'
+        start_datetime:
+          type: MinMaxDatetime
+          datetime: '{{ config["start_date"] }}'
+          datetime_format: '%Y-%m-%dT%H:%M:%SZ'
+        datetime_format: '%Y-%m-%d'
+        cursor_datetime_formats:
+          - '%Y-%m-%d'
+    yukashoken:
+      type: DeclarativeStream
+      name: yukashoken
+      retriever:
+        type: SimpleRetriever
+        paginator:
+          type: DefaultPaginator
+          page_token_option:
+            type: RequestOption
+            field_name: next_page_token
+            inject_into: request_parameter
+          pagination_strategy:
+            type: CursorPagination
+            cursor_value: '{{ response.get("next_page_token", {}) }}'
+            stop_condition: '{{ not response.get("next_page_token", {}) }}'
+        requester:
+          $ref: '#/definitions/base_requester'
+          path: edinet_yukashoken
+          http_method: GET
+        record_selector:
+          type: RecordSelector
+          extractor:
+            type: DpathExtractor
+            field_path:
+              - data
+      primary_key:
+        - docID
+      schema_loader:
+        type: InlineSchemaLoader
+        schema:
+          $ref: '#/schemas/yukashoken'
+      incremental_sync:
+        type: DatetimeBasedCursor
+        cursor_field: submitDateTime
+        end_datetime:
+          type: MinMaxDatetime
+          datetime: '{{ now_utc().strftime(''%Y-%m-%dT%H:%M:%SZ'') }}'
+          datetime_format: '%Y-%m-%dT%H:%M:%SZ'
+        start_datetime:
+          type: MinMaxDatetime
+          datetime: '{{ config["start_date"] }}'
+          datetime_format: '%Y-%m-%dT%H:%M:%SZ'
+        datetime_format: '%Y-%m-%d'
+        end_time_option:
+          type: RequestOption
+          field_name: to_date
+          inject_into: request_parameter
+        start_time_option:
+          type: RequestOption
+          field_name: from_date
+          inject_into: request_parameter
+        cursor_datetime_formats:
+          - '%Y-%m-%d %H:%M'
+  base_requester:
+    type: HttpRequester
+    url_base: http://172.30.0.1:8083/
+    authenticator:
+      type: ApiKeyAuthenticator
+      api_token: '{{ config["api_key"] }}'
+      inject_into:
+        type: RequestOption
+        field_name: x-api-key
+        inject_into: header
+
+streams:
+  - $ref: '#/definitions/streams/metadata'
+  - $ref: '#/definitions/streams/documents'
+  - $ref: '#/definitions/streams/yukashoken'
+
+spec:
+  type: Spec
+  connection_specification:
+    type: object
+    $schema: http://json-schema.org/draft-07/schema#
+    required:
+      - api_key
+      - start_date
+    properties:
+      api_key:
+        type: string
+        order: 0
+        title: API Key
+        airbyte_secret: true
+      start_date:
+        type: string
+        order: 1
+        title: Start date
+        format: date-time
+        pattern: ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$
+    additionalProperties: true
+
+metadata:
+  autoImportSchema:
+    metadata: true
+    documents: true
+    yukashoken: true
+
+schemas:
+  metadata:
+    type: object
+    $schema: http://json-schema.org/schema#
+    required:
+      - docID
+      - target_date
+    properties:
+      JCN:
+        type:
+          - string
+          - 'null'
+      docID:
+        type: string
+      csvFlag:
+        type:
+          - string
+          - 'null'
+      pdfFlag:
+        type:
+          - string
+          - 'null'
+      secCode:
+        type:
+          - string
+          - 'null'
+      formCode:
+        type:
+          - string
+          - 'null'
+      fundCode:
+        type:
+          - string
+          - 'null'
+      xbrlFlag:
+        type:
+          - string
+          - 'null'
+      filerName:
+        type:
+          - string
+          - 'null'
+      periodEnd:
+        type:
+          - string
+          - 'null'
+      seqNumber:
+        type:
+          - number
+          - 'null'
+      edinetCode:
+        type:
+          - string
+          - 'null'
+      docTypeCode:
+        type:
+          - string
+          - 'null'
+      legalStatus:
+        type:
+          - string
+          - 'null'
+      parentDocID:
+        type:
+          - string
+          - 'null'
+      periodStart:
+        type:
+          - string
+          - 'null'
+      target_date:
+        type: string
+      attachDocFlag:
+        type:
+          - string
+          - 'null'
+      ordinanceCode:
+        type:
+          - string
+          - 'null'
+      docDescription:
+        type:
+          - string
+          - 'null'
+      englishDocFlag:
+        type:
+          - string
+          - 'null'
+      submitDateTime:
+        type:
+          - string
+          - 'null'
+      disclosureStatus:
+        type:
+          - string
+          - 'null'
+      withdrawalStatus:
+        type:
+          - string
+          - 'null'
+      docInfoEditStatus:
+        type:
+          - string
+          - 'null'
+    additionalProperties: true
+  documents:
+    type: object
+    $schema: http://json-schema.org/schema#
+    required:
+      - create_or_insert_date
+    properties:
+      値:
+        type:
+          - string
+          - 'null'
+      uuid:
+        type:
+          - string
+          - 'null'
+      doc_id:
+        type:
+          - string
+          - 'null'
+      単位:
+        type:
+          - string
+          - 'null'
+      要素ID:
+        type:
+          - string
+          - 'null'
+      項目名:
+        type:
+          - string
+          - 'null'
+      相対年度:
+        type:
+          - string
+          - 'null'
+      ユニットID:
+        type:
+          - string
+          - 'null'
+      期間・時点:
+        type:
+          - string
+          - 'null'
+      連結・個別:
+        type:
+          - string
+          - 'null'
+      コンテキストID:
+        type:
+          - string
+          - 'null'
+      create_or_insert_date:
+        type: string
+    additionalProperties: true
+  yukashoken:
+    type: object
+    $schema: http://json-schema.org/schema#
+    required:
+      - docID
+      - submitDateTime
+    properties:
+      JCN:
+        type:
+          - string
+          - 'null'
+      data:
+        type:
+          - array
+          - 'null'
+        items:
+          type:
+            - object
+            - 'null'
+          properties:
+            値:
+              type:
+                - string
+                - 'null'
+            単位:
+              type:
+                - string
+                - 'null'
+            要素ID:
+              type:
+                - string
+                - 'null'
+            項目名:
+              type:
+                - string
+                - 'null'
+            相対年度:
+              type:
+                - string
+                - 'null'
+            ユニットID:
+              type:
+                - string
+                - 'null'
+            期間・時点:
+              type:
+                - string
+                - 'null'
+            連結・個別:
+              type:
+                - string
+                - 'null'
+            コンテキストID:
+              type:
+                - string
+                - 'null'
+      docID:
+        type: string
+      csvFlag:
+        type:
+          - string
+          - 'null'
+      pdfFlag:
+        type:
+          - string
+          - 'null'
+      secCode:
+        type:
+          - string
+          - 'null'
+      formCode:
+        type:
+          - string
+          - 'null'
+      fundCode:
+        type:
+          - string
+          - 'null'
+      xbrlFlag:
+        type:
+          - string
+          - 'null'
+      filerName:
+        type:
+          - string
+          - 'null'
+      periodEnd:
+        type:
+          - string
+          - 'null'
+      seqNumber:
+        type:
+          - number
+          - 'null'
+      edinetCode:
+        type:
+          - string
+          - 'null'
+      docTypeCode:
+        type:
+          - string
+          - 'null'
+      legalStatus:
+        type:
+          - string
+          - 'null'
+      parentDocID:
+        type:
+          - string
+          - 'null'
+      periodStart:
+        type:
+          - string
+          - 'null'
+      attachDocFlag:
+        type:
+          - string
+          - 'null'
+      ordinanceCode:
+        type:
+          - string
+          - 'null'
+      docDescription:
+        type:
+          - string
+          - 'null'
+      englishDocFlag:
+        type:
+          - string
+          - 'null'
+      submitDateTime:
+        type: string
+      disclosureStatus:
+        type:
+          - string
+          - 'null'
+      withdrawalStatus:
+        type:
+          - string
+          - 'null'
+      docInfoEditStatus:
+        type:
+          - string
+          - 'null'
+    additionalProperties: true
